@@ -7,6 +7,7 @@
 extern crate alloc as std;
 
 // Define modules.
+pub mod arbos;
 
 mod builder;
 mod context;

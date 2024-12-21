@@ -22,6 +22,13 @@ rust_2018_idioms = "deny"
 all = "warn"
 
 [dependencies]
+# stylus
+arbutil = { path = "../../../nitro/arbitrator/arbutil" }
+stylus = { path = "../../../nitro/arbitrator/stylus" }
+eyre = "0.6.12"
+hex = "0.4"
+wasmer-types = { path = "../../../nitro/arbitrator/tools/wasmer/lib/types" }
+
 # revm
 revm-interpreter = { path = "../interpreter", version = "14.0.0", default-features = false }
 revm-precompile = { path = "../precompile", version = "15.0.0", default-features = false }
@@ -144,10 +151,10 @@ name = "db_by_ref"
 path = "../../examples/db_by_ref.rs"
 required-features = ["std", "serde-json"]
 
-#[[example]]
-#name = "uniswap_v2_usdc_swap"
-#path = "../../examples/uniswap_v2_usdc_swap.rs"
-#required-features = ["alloydb"]
+[[example]]
+name = "stylus_example"
+path = "../../examples/example_stylus.rs"
+required-features = ["alloydb"]
 
 [[bench]]
 name = "bench"
