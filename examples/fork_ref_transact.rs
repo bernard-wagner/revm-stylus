@@ -37,10 +37,11 @@ async fn main() -> anyhow::Result<()> {
     // generate abi for the calldata from the human readable interface
     sol! {
         function getReserves() external view returns (uint112 reserve0, uint112 reserve1, uint32 blockTimestampLast);
+        function balanceOf(address) external view returns (uint256);
     }
 
     // encode abi into Bytes
-    let encoded = getReservesCall::new(()).abi_encode();
+    let encoded = balanceOfCall::new((pool_address,)).abi_encode();
 
     // initialize new EthersDB
     let mut ethersdb = EthersDB::new(client, None).unwrap();
@@ -92,13 +93,13 @@ async fn main() -> anyhow::Result<()> {
         _ => panic!("Execution failed: {result:?}"),
     };
 
+    println!("Value: {:#?}", value);
+
     // decode bytes to reserves + ts via alloy's abi decode
-    let return_vals = getReservesCall::abi_decode_returns(&value, true)?;
+    let return_vals = balanceOfCall::abi_decode_returns(&value, true)?;
 
     // Print emulated getReserves() call output
-    println!("Reserve0: {:#?}", return_vals.reserve0);
-    println!("Reserve1: {:#?}", return_vals.reserve1);
-    println!("Timestamp: {:#?}", return_vals.blockTimestampLast);
+    println!("BalanceOf: {:#?}", return_vals._0);
 
     Ok(())
 }

@@ -1,18 +1,15 @@
+use revm_interpreter::{instructions::stack, CallScheme, CallValue};
+
 use crate::{
-    builder::{EvmBuilder, HandlerStage, SetGenericStage},
-    db::{Database, DatabaseCommit, EmptyDB},
-    handler::Handler,
-    interpreter::{
+    arbos::{execution::execute_stylus_frame, requestor::{EvmApiOutcome, EvmApiRequest}}, builder::{EvmBuilder, HandlerStage, SetGenericStage}, db::{Database, DatabaseCommit, EmptyDB}, handler::Handler, interpreter::{
         CallInputs, CreateInputs, EOFCreateInputs, Host, InterpreterAction, SharedMemory,
-    },
-    primitives::{
+    }, primitives::{
         specification::SpecId, BlockEnv, CfgEnv, EVMError, EVMResult, EnvWithHandlerCfg,
         ExecutionResult, HandlerCfg, ResultAndState, TxEnv, TxKind, EOF_MAGIC_BYTES,
-    },
-    Context, ContextWithHandlerCfg, Frame, FrameOrResult, FrameResult,
+    }, Context, ContextWithHandlerCfg, Frame, FrameOrResult, FrameResult
 };
 use core::fmt;
-use std::{boxed::Box, vec::Vec};
+use std::{boxed::Box, sync::mpsc::{self, Receiver, Sender, SyncSender}, thread::current, vec::Vec};
 
 /// EVM call stack limit.
 pub const CALL_STACK_LIMIT: u64 = 1024;
@@ -166,6 +163,157 @@ impl<'a, EXT, DB: Database> Evm<'a, EXT, DB> {
             }
         }
     }
+
+    #[inline]
+    pub fn run_the_loop_stylus(&mut self, first_frame: Frame, is_stylus: bool) -> Result<FrameResult, EVMError<DB::Error>> {
+        let mut call_stack: Vec<(Frame, Option<(SyncSender<EvmApiOutcome>, Receiver<EvmApiRequest>)>)> = Vec::with_capacity(1025);
+        call_stack.push((first_frame, None));
+
+        #[cfg(feature = "memory_limit")]
+        let mut shared_memory =
+            SharedMemory::new_with_memory_limit(self.context.evm.env.cfg.memory_limit);
+        #[cfg(not(feature = "memory_limit"))]
+        let mut shared_memory = SharedMemory::new();
+
+        shared_memory.new_context();
+
+        // Peek the last stack frame.
+        let mut current_frame = call_stack.last_mut().unwrap();
+
+        loop {
+
+            let (ref mut stack_frame, stylus_frame) = current_frame;
+
+            // if is stylus -> exec_stylus_frame and wait for the response (we always have to receive a next_action)
+            
+            
+
+            let next_action = if let Some((_, rx)) = stylus_frame {
+               let request = rx.recv().unwrap();               
+               match request {                  
+                   EvmApiRequest::ContractCall(args) => {
+                     InterpreterAction::Call { inputs: Box::new(CallInputs {
+                        input: args.calldata,
+                        gas_limit: args.gas_limit,
+                        target_address: args.address,
+                        caller: stack_frame.frame_data().interpreter.contract().target_address,
+                        bytecode_address: args.address,
+                        value: CallValue::Transfer(args.value),
+                        scheme: CallScheme::Call,
+                        is_static: stack_frame.frame_data().interpreter.is_static,
+                        is_eof: false,
+                        return_memory_offset: 0..0,
+                      }) 
+                    }
+                   },
+                   _ => {
+                        // Continue Stylus Frame execution
+                        continue;
+                   }
+               }
+            } else {
+                if is_stylus {
+                  
+
+                    execute_stylus_frame(stack_frame, fromthread_tx, tothread_rx);
+
+                  
+
+                    continue;
+                }
+                // Execute the frame.
+                self.handler
+                    .execute_frame(stack_frame, &mut shared_memory, &mut self.context)?
+            };
+                      
+
+            // Take error and break the loop, if any.
+            // This error can be set in the Interpreter when it interacts with the context.
+            self.context.evm.take_error()?;
+
+            let exec = &mut self.handler.execution;
+            let frame_or_result = match next_action {
+                InterpreterAction::Call { inputs } => { 
+                    exec.call(&mut self.context, inputs)?
+                },
+                InterpreterAction::Create { inputs } => {exec.create(&mut self.context, inputs)?},
+                InterpreterAction::EOFCreate { inputs } => {
+                    exec.eofcreate(&mut self.context, inputs)?
+                }
+                InterpreterAction::Return { result } => {
+                    // free memory context.
+                    shared_memory.free_context();
+
+                    // pop last frame from the stack and consume it to create FrameResult.
+                    let (returned_frame, _) = call_stack
+                        .pop()
+                        .expect("We just returned from Interpreter frame");
+                    
+                    let ctx = &mut self.context;
+                    FrameOrResult::Result(match returned_frame {
+                        Frame::Call(frame) => {
+                            // return_call
+                            FrameResult::Call(exec.call_return(ctx, frame, result)?)
+                        }
+                        Frame::Create(frame) => {
+                            // return_create
+                            FrameResult::Create(exec.create_return(ctx, frame, result)?)
+                        }
+                        Frame::EOFCreate(frame) => {
+                            // return_eofcreate
+                            FrameResult::EOFCreate(exec.eofcreate_return(ctx, frame, result)?)
+                        }
+                    })
+                }
+                InterpreterAction::None => unreachable!("InterpreterAction::None is not expected"),
+            };
+            // handle result
+            match frame_or_result {
+                FrameOrResult::Frame(frame) => {
+                    let (tothread_tx, tothread_rx) = mpsc::sync_channel::<EvmApiOutcome>(0);
+                    let (fromthread_tx, fromthread_rx) = mpsc::sync_channel::<EvmApiRequest>(0);
+                    let new_stylus_frame = Some((tothread_tx, fromthread_rx));
+
+                    shared_memory.new_context();
+                    call_stack.push((frame, new_stylus_frame));
+                    current_frame = call_stack.last_mut().unwrap();
+                }
+                FrameOrResult::Result(result) => {
+                    let Some(top_frame) = call_stack.last_mut() else {
+                        // Break the loop if there are no more frames.
+                        return Ok(result);
+                    };
+
+                    current_frame = top_frame;
+
+                    let (stack_frame, stylus_frame) = current_frame;
+                    let ctx = &mut self.context;
+                    // Insert result to the top frame.
+                    match result {
+                        FrameResult::Call(outcome) => {
+                            if let Some((tx, _)) = stylus_frame {
+                                tx.send(EvmApiOutcome::Call(crate::arbos::requestor::StylusOutcome::Return(outcome.output().clone()), outcome.gas().spent())).unwrap();
+                            }
+                            // return_call
+                            exec.insert_call_outcome(ctx, stack_frame, &mut shared_memory, outcome)?
+                        }
+                        FrameResult::Create(outcome) => {
+                            if let Some((tx, _)) = stylus_frame {
+                                tx.send(EvmApiOutcome::Call(crate::arbos::requestor::StylusOutcome::Return(outcome.output().clone()), outcome.gas().spent())).unwrap();
+                            }
+                            // return_create
+                            exec.insert_create_outcome(ctx, stack_frame, outcome)?
+                        }
+                        FrameResult::EOFCreate(outcome) => {
+                            // return_eofcreate
+                            exec.insert_eofcreate_outcome(ctx, stack_frame, outcome)?
+                        }
+                    }
+                }
+            }
+        }
+    }
+
 }
 
 impl<EXT, DB: Database> Evm<'_, EXT, DB> {

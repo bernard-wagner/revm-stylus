@@ -13,9 +13,12 @@ use arbutil::evm::{
     EvmData,
 };
 use eyre::{eyre, Result};
-use revm_interpreter::{CallInputs, CallOutcome, CreateInputs};
+use revm_interpreter::instructions::data;
+use revm_interpreter::{gas, CallInputs, CallOutcome, CreateInputs, CreateOutcome};
+use revm_precompile::B256;
 use stylus::env::{Escape, MaybeEscape};
 use stylus::prover::programs::config::{CompileConfig, StylusConfig};
+use std::os::macos::raw::stat;
 use std::thread;
 use std::time::Duration;
 use std::{
@@ -26,7 +29,9 @@ use std::{
     thread::JoinHandle,
 };
 use stylus::{native::NativeInstance, run::RunProgram};
-use crate::primitives::{Address,Bytes, Log, U256};
+use crate::primitives::{Address,Bytes, U256};
+
+use crate::arbos::revm_types;
 
 
 struct StylusRequestor {
@@ -38,55 +43,80 @@ struct StylusRequestor {
 #[derive(Clone)]
 pub enum EvmApiRequest {
     GetBytes32(U256),
-    SetTrieSlots(U256, U256, Bytes, u64),
+    SetTrieSlots(B256, B256, Bytes, u64),
     GetTransientBytes32(Bytes),
     SetTransientBytes32(Bytes),
-    ContractCall(CallInputs),
-    DelegateCall(CallInputs),
-    StaticCall(CallInputs),
-    Create1(CreateInputs),
-    Create2(CreateInputs),
-    EmitLog(Log),
+    ContractCall(CallArguments),
+    DelegateCall(CallArguments),
+    StaticCall(CallArguments),
+    Create1(CreateArguments),
+    Create2(CreateArguments),
+    EmitLog(Vec<B256>, Bytes),
     AccountBalance(Address),
     AccountCode(Address),
     AccountCodeHash(Address),
     AddPages(u16),
-    CaptureHostIO,
+    CaptureHostIO(Bytes),
 
     // At the end of execution
     StylusOutcome(StylusOutcome)
 }
 
 #[derive(Clone)]
+pub struct CallArguments {
+    pub address: Address,
+    pub value: U256,
+    pub gas_limit: u64,
+    pub calldata: Bytes,
+    pub call_type: CallType,
+}
+
+#[derive(Clone)]
+pub enum CallType {
+    ContractCall,
+    DelegateCall,
+    StaticCall,
+}
+
+#[derive(Clone)]
+pub struct CreateArguments {
+    pub value: U256,
+    pub gas_limit: u64,
+    pub salt: B256,
+    pub code: Bytes,
+    pub create_type: CreateType,
+}
+
+#[derive(Clone)]
+pub enum CreateType {
+    Create1,
+    Create2,
+}
+
+
+
+#[derive(Clone)]
 pub enum EvmApiOutcome {
     GetBytes32(U256, u64),
-    SetTrieSlots(u64),
-    GetTransientBytes32(U256, u64),
+    GetTrieSlots(u64),
+    GetTransientBytes32(B256, u64),
     SetTransientBytes32(u64),
-    ContractCall(CallOutcome, Bytes, u64),
-    DelegateCall(CallInputs),
-    StaticCall(CallInputs),
-    Create1(CreateInputs),
-    Create2(CreateInputs),
-    EmitLog(Log),
-    AccountBalance(Address),
-    AccountCode(Address),
-    AccountCodeHash(Address),
-    AddPages(u16),
-    CaptureHostIO,
-
-    GetBytes32(Bytes, u64),
-    TrieSlots(u64),
-    TransientBytes32(Bytes, u64),
+    Call(StylusOutcome, u64),
+    Create(StylusOutcome, Address, u64),
+    EmitLog(u64),
     AccountBalance(U256, u64),
     AccountCode(Bytes, u64),
-    AccountCodeHash(U256, u64),
-    HostIO(Bytes, u64),
+    AccountCodeHash(B256, u64),
+    AddPages(u64),
+    CaptureHostIO(u64),
+
+    // Simpe ACK
+    StylusOutcome,
 }
 
 
 #[derive(Clone)]
-enum StylusOutcome {
+pub enum StylusOutcome {
     Return(Bytes),
     Revert(Bytes),
     Failure,
@@ -118,35 +148,110 @@ impl RequestHandler<VecReader> for StylusRequestor {
         req_type: EvmApiMethod,
         req_data: impl AsRef<[u8]>,
     ) -> (Vec<u8>, VecReader, Gas) {
-        let data = req_data.as_ref().to_vec();
+        let mut data = req_data.as_ref().to_vec();
 
         let msg = match req_type {
             EvmApiMethod::GetBytes32 => {
-                let data = U256::from_be_slice(data.as_slice());
+                let data = revm_types::take_u256(&mut data);
                 EvmApiRequest::GetBytes32(data)
             },
             EvmApiMethod::SetTrieSlots => {
-                let gas_left = u64::from_be_bytes(data[0..8].try_into().unwrap());
-                let key = U256::from_be_slice(data[8..40].try_into().unwrap());
-                let value = U256::from_be_slice(data[40..72].try_into().unwrap());
-                let data = Bytes::from(data[72..].to_vec());
+                let gas_left = revm_types::take_u64(&mut data);
+                let key = revm_types::take_bytes32(&mut data);
+                let value = revm_types::take_bytes32(&mut data);
                 
-                EvmApiRequest::SetTrieSlots(key, value, data, gas_left)
+                EvmApiRequest::SetTrieSlots(key, value, revm_types::take_rest(&mut data), gas_left)
   
             },
-            EvmApiMethod::GetTransientBytes32 => todo!(),
-            EvmApiMethod::SetTransientBytes32 => todo!(),
-            EvmApiMethod::ContractCall => todo!(),
-            EvmApiMethod::DelegateCall => todo!(),
-            EvmApiMethod::StaticCall => todo!(),
-            EvmApiMethod::Create1 => todo!(),
-            EvmApiMethod::Create2 => todo!(),
-            EvmApiMethod::EmitLog => todo!(),
-            EvmApiMethod::AccountBalance => todo!(),
-            EvmApiMethod::AccountCode => todo!(),
-            EvmApiMethod::AccountCodeHash => todo!(),
-            EvmApiMethod::AddPages => todo!(),
-            EvmApiMethod::CaptureHostIO => todo!(),
+            EvmApiMethod::GetTransientBytes32 => {
+                EvmApiRequest::GetTransientBytes32(revm_types::take_rest(&mut data))
+            }
+            EvmApiMethod::SetTransientBytes32 => {
+                EvmApiRequest::SetTransientBytes32(revm_types::take_rest(&mut data))
+            }
+            EvmApiMethod::ContractCall | EvmApiMethod::DelegateCall | EvmApiMethod::StaticCall  => {
+                let address = revm_types::take_address(&mut data);
+                let value = revm_types::take_u256(&mut data);
+                let _ = revm_types::take_u64(&mut data);
+                let gas_limit = revm_types::take_u64(&mut data);
+                let calldata = revm_types::take_rest(&mut data);
+
+                let call_type = match req_type {
+                    EvmApiMethod::ContractCall => CallType::ContractCall,
+                    EvmApiMethod::DelegateCall => CallType::DelegateCall,
+                    EvmApiMethod::StaticCall => CallType::StaticCall,
+                    _ => unreachable!(),
+                };
+                
+                EvmApiRequest::ContractCall(CallArguments {
+                    address,
+                    value,
+                    gas_limit,
+                    calldata,
+                    call_type,
+                })
+            },
+            EvmApiMethod::Create1 => {
+                let gas_limit = revm_types::take_u64(&mut data);
+                let value = revm_types::take_u256(&mut data);
+                let code = revm_types::take_rest(&mut data);
+                
+                EvmApiRequest::Create1(CreateArguments {
+                    value,
+                    gas_limit,
+                    salt: B256::ZERO,
+                    code,
+                    create_type: CreateType::Create1,
+                })
+            },
+            EvmApiMethod::Create2 => {
+                let gas_limit = revm_types::take_u64(&mut data);
+                let value = revm_types::take_u256(&mut data);
+                let salt = revm_types::take_bytes32(&mut data);
+                let code = revm_types::take_rest(&mut data);
+                
+                EvmApiRequest::Create1(CreateArguments {
+                    value,
+                    gas_limit,
+                    salt: salt.into(),
+                    code,
+                    create_type: CreateType::Create2,
+                })
+            },
+            EvmApiMethod::EmitLog => {
+                let topic_count = revm_types::take_u32(&mut data);
+                
+                let mut topics = vec![];
+                
+                for _ in 0..topic_count {
+                    let hash = revm_types::take_bytes32(&mut data);
+                    topics.push(hash);
+                };
+                
+                let data = revm_types::take_rest(&mut data);
+
+                EvmApiRequest::EmitLog(topics, data)
+
+            },
+            EvmApiMethod::AccountBalance => {
+                let address = revm_types::take_address(&mut data);
+                EvmApiRequest::AccountBalance(address)
+            },
+            EvmApiMethod::AccountCode => {
+                let address = revm_types::take_address(&mut data);
+                EvmApiRequest::AccountCode(address)
+            },
+            EvmApiMethod::AccountCodeHash => {
+                let address = revm_types::take_address(&mut data);
+                EvmApiRequest::AccountCodeHash(address)
+            },
+            EvmApiMethod::AddPages => {
+                let count = revm_types::take_u16(&mut data);
+                EvmApiRequest::AddPages(count)
+            },
+            EvmApiMethod::CaptureHostIO => {
+                EvmApiRequest::CaptureHostIO(revm_types::take_rest(&mut data))
+            },
         };
 
         if let Err(error) = self.tx.send(msg) {
@@ -155,14 +260,17 @@ impl RequestHandler<VecReader> for StylusRequestor {
         match self.rx.recv() {
             Ok(response) => {
                 match response {
-                    EvmApiOutcome::Bytes32(data, gas_cost) => {
-                        (data.to_vec(), VecReader::new(vec![]), Gas(gas_cost))
+                    EvmApiOutcome::GetBytes32(data, gas_cost) => {
+                        (data.to_be_bytes_vec(), VecReader::new(vec![]), Gas(gas_cost))
                     },
-                    EvmApiOutcome::TrieSlots(gas_cost)=> {                        
+                    EvmApiOutcome::GetTrieSlots(gas_cost)=> {                        
                         (Status::Success.into(), VecReader::new(vec![]), Gas(gas_cost))
                     },
-                    EvmApiOutcome::TransientBytes32(data, gas_cost) => {
+                    EvmApiOutcome::GetTransientBytes32(data, gas_cost) => {
                         (data.to_vec(), VecReader::new(vec![]), Gas(gas_cost))
+                    },
+                    EvmApiOutcome::SetTransientBytes32(gas_cost) => {
+                        (Status::Success.into(), VecReader::new(vec![]), Gas(gas_cost))
                     },
                     EvmApiOutcome::AccountBalance(data, gas_cost) => {
                         (data.to_be_bytes_vec(), VecReader::new(vec![]), Gas(gas_cost))
@@ -171,10 +279,43 @@ impl RequestHandler<VecReader> for StylusRequestor {
                         (data.to_vec(), VecReader::new(vec![]), Gas(gas_cost))
                     },
                     EvmApiOutcome::AccountCodeHash(data, gas_cost) => {
-                        (Status::Success.into(), VecReader::new(data.to_be_bytes_vec()), Gas(gas_cost))
+                        (Status::Success.into(), VecReader::new(data.to_vec()), Gas(gas_cost))
                     },
-                    EvmApiOutcome::HostIO(data, gas_cost) => {
+                    EvmApiOutcome::CaptureHostIO(gas_cost) => {
                         (Status::Success.into(), VecReader::new(vec![]), Gas(gas_cost))
+                    },
+                    EvmApiOutcome::Call(stylus_outcome, gas_cost) => {
+                        let (result, data) = match stylus_outcome {
+                            StylusOutcome::Return(data) => (Status::Success, data),
+                            StylusOutcome::Revert(data) => (Status::Failure, data),
+                            StylusOutcome::Failure => (Status::Failure, vec![].into()),
+                            StylusOutcome::OutOfInk => (Status::OutOfGas, vec![].into()),
+                            StylusOutcome::OutOfStack => (Status::WriteProtection, vec![].into()),
+                        };
+
+                        (result.into(), VecReader::new(data.to_vec()), Gas(gas_cost))
+                    },
+                    EvmApiOutcome::Create(stylus_outcome, address, gas_cost) => {
+                        let (status, data) = match stylus_outcome {
+                            StylusOutcome::Return(data) => (Status::Success, data),
+                            StylusOutcome::Revert(data) => (Status::Failure, data),
+                            StylusOutcome::Failure => (Status::Failure, vec![].into()),
+                            StylusOutcome::OutOfInk => (Status::OutOfGas, vec![].into()),
+                            StylusOutcome::OutOfStack => (Status::WriteProtection, vec![].into()),
+                        };
+
+                        let result = [status.into(), address.to_vec()].concat();
+
+                        (result.into(), VecReader::new(data.to_vec()), Gas(gas_cost))
+                    },
+                    EvmApiOutcome::EmitLog(gas_cost) => {
+                        (Status::Success.into(), VecReader::new(vec![]), Gas(gas_cost))
+                    },
+                    EvmApiOutcome::AddPages(gas_cost) => {
+                        (Status::Success.into(), VecReader::new(vec![]), Gas(gas_cost))
+                    },
+                    EvmApiOutcome::StylusOutcome => {
+                        (Status::Success.into(), VecReader::new(vec![]), Gas(0))
                     },
                 }
             },
@@ -187,7 +328,7 @@ struct CothreadHandler {
     tx: SyncSender<EvmApiOutcome>,
     rx: Receiver<EvmApiRequest>,
     thread: Option<JoinHandle<MaybeEscape>>,
-    last_request: Option<(EvmApiRequest, u32)>,
+    last_request: Option<EvmApiRequest>,
 }
 
 impl CothreadHandler {
@@ -196,7 +337,7 @@ impl CothreadHandler {
         let Ok(msg) = msg else {
             return MaybeEscape::Err(Escape::Exit(1));
         };
-        self.last_request = Some((msg, 0x11111)); // TODO: Ids
+        self.last_request = Some(msg); // TODO: Ids
         Ok(())
     }
 
@@ -209,7 +350,7 @@ impl CothreadHandler {
         }
     }
 
-    pub fn last_message(&self) -> Result<(EvmApiRequest, u32), Escape> {
+    pub fn last_message(&self) -> Result<EvmApiRequest, Escape> {
         self.last_request
             .clone()
             .ok_or_else(|| Escape::Exit(4))
@@ -217,15 +358,14 @@ impl CothreadHandler {
 
     pub fn set_response(
         &mut self,
-        id: u32,
         result: EvmApiOutcome
     ) -> MaybeEscape {
-        let Some(msg) = self.last_request.clone() else {
-            return MaybeEscape::Err(Escape::Exit(5));
-        };
-        if msg.1 != id {
-            return MaybeEscape::Err(Escape::Exit(6));
-        };
+        // let Some(msg) = self.last_request.clone() else {
+        //     return MaybeEscape::Err(Escape::Exit(5));
+        // };
+        // if msg.1 != id {
+        //     return MaybeEscape::Err(Escape::Exit(6));
+        // };
         
         if let Err(_) = self.tx.send(result) {
             return MaybeEscape::Err(Escape::Exit(7));
@@ -234,6 +374,123 @@ impl CothreadHandler {
     }
 }
 
+// struct StylusHandler {
+//     pub callback: Box<dyn FnMut(EvmApiRequest) -> EvmApiOutcome + Send>,
+// }
+
+// impl RequestHandler<VecReader> for StylusHandler {
+//     fn request(
+//         &mut self,
+//         req_type: EvmApiMethod,
+//         req_data: impl AsRef<[u8]>,
+//     ) -> (Vec<u8>, VecReader, Gas) {
+//         let mut data = req_data.as_ref().to_vec();
+//         let msg = match req_type {
+//             EvmApiMethod::GetBytes32 => {
+//                 let data = revm_types::take_u256(&mut data);
+//                 EvmApiRequest::GetBytes32(data)
+//             },
+//             EvmApiMethod::SetTrieSlots => {
+//                 let gas_left = revm_types::take_u64(&mut data);
+//                 let key = revm_types::take_bytes32(&mut data);
+//                 let value = revm_types::take_bytes32(&mut data);
+                
+//                 EvmApiRequest::SetTrieSlots(key, value, revm_types::take_rest(&mut data), gas_left)
+  
+//             },
+//             EvmApiMethod::GetTransientBytes32 => {
+//                 EvmApiRequest::GetTransientBytes32(revm_types::take_rest(&mut data))
+//             }
+//             EvmApiMethod::SetTransientBytes32 => {
+//                 EvmApiRequest::SetTransientBytes32(revm_types::take_rest(&mut data))
+//             }
+//             EvmApiMethod::ContractCall | EvmApiMethod::DelegateCall | EvmApiMethod::StaticCall  => {
+//                 let address = revm_types::take_address(&mut data);
+//                 let value = revm_types::take_u256(&mut data);
+//                 let _ = revm_types::take_u64(&mut data);
+//                 let gas_limit = revm_types::take_u64(&mut data);
+//                 let calldata = revm_types::take_rest(&mut data);
+
+//                 let calldata = Bytes::from(data[68..].to_vec());
+//                 let call_type = match req_type {
+//                     EvmApiMethod::ContractCall => CallType::ContractCall,
+//                     EvmApiMethod::DelegateCall => CallType::DelegateCall,
+//                     EvmApiMethod::StaticCall => CallType::StaticCall,
+//                     _ => unreachable!(),
+//                 };
+                
+//                 EvmApiRequest::ContractCall(CallArguments {
+//                     address,
+//                     value,
+//                     gas_limit,
+//                     calldata,
+//                     call_type,
+//                 })
+//             },
+//             _ => todo!(),
+//         };
+
+//         let result = (self.callback)(msg).unwrap();
+
+//         match result {
+//             EvmApiOutcome::GetBytes32(data, gas_cost) => {
+//                 (data.to_vec(), VecReader::new(vec![]), Gas(gas_cost))
+//             },
+//             _ => todo!(),
+//         }
+
+//     }
+// }
+
+// pub fn exec_wasm_sync(module: &str,
+//     calldata: Vec<u8>,
+//     config: StylusConfig,
+//     evm_data: EvmData,
+//     ink: Ink,
+//     callback:  Box<dyn FnMut(EvmApiRequest) -> EvmApiOutcome>,
+// ) -> Result<EvmApiOutcome> {
+
+//     let handler = StylusHandler {
+//         callback,
+//     };
+
+//     let instance = NativeInstance::from_path(
+//         module, 
+//         EvmApiRequestor::new(handler),
+//         evm_data,
+//         &CompileConfig::default(),
+//         config,
+//         wasmer_types::compilation::target::Target::default(),
+//     );
+
+//     let mut instance = match instance {
+//         Ok(instance) => instance,
+//         Err(error) => Err(eyre!("failed to deserialize instance: {error}"))?,
+//     };
+
+//     let outcome = instance.run_main(&calldata, config, ink);
+
+//     let outcome = match outcome {
+//         Err(e) | Ok(UserOutcome::Failure(e)) => UserOutcome::Failure(e.wrap_err("call failed")),
+//         Ok(outcome) => outcome,
+//     };
+
+//     let (out_kind, data) = outcome.into_data();
+
+//     let outcome = match out_kind {
+//         UserOutcomeKind::Success => StylusOutcome::Return(data.into()),
+//         UserOutcomeKind::Revert => StylusOutcome::Revert(data.into()),
+//         UserOutcomeKind::Failure => StylusOutcome::Failure,
+//         UserOutcomeKind::OutOfInk => StylusOutcome::OutOfInk,
+//         UserOutcomeKind::OutOfStack => StylusOutcome::OutOfStack,
+//     };
+
+//     Ok(EvmApiOutcome::ContractCall(outcome, 0))
+
+
+// }
+
+
 /// Executes a wasm on a new thread
 pub fn exec_wasm(
     module: &str,
@@ -241,18 +498,19 @@ pub fn exec_wasm(
     config: StylusConfig,
     evm_data: EvmData,
     ink: Ink,
-) -> Result<CothreadHandler> {
-    let (tothread_tx, tothread_rx) = mpsc::sync_channel::<EvmApiOutcome>(0);
-    let (fromthread_tx, fromthread_rx) = mpsc::sync_channel::<EvmApiRequest>(0);
+    tx: SyncSender<EvmApiRequest>,
+    rx: Receiver<EvmApiOutcome>,
+) {
+    // let (tothread_tx, tothread_rx) = mpsc::sync_channel::<EvmApiOutcome>(0);
+    // let (fromthread_tx, fromthread_rx) = mpsc::sync_channel::<EvmApiRequest>(0);
 
     let cothread = StylusRequestor {
-        tx: fromthread_tx,
-        rx: tothread_rx,
+        tx, rx
     };
 
     let evm_api = EvmApiRequestor::new(cothread);
 
-    let instance = NativeInstance::from_path(
+    let mut instance = NativeInstance::from_path(
         module, 
         evm_api, 
         evm_data,
@@ -260,14 +518,11 @@ pub fn exec_wasm(
         config,
         wasmer_types::compilation::target::Target::default(),
 
-    );
+    ).unwrap();
 
-    let mut instance = match instance {
-        Ok(instance) => instance,
-        Err(error) => Err(eyre!("failed to deserialize instance: {error}"))?,
-    };
 
-    let thread = thread::spawn(move || {
+    // TODO handle join 
+    thread::spawn(move || {
         let outcome = instance.run_main(&calldata, config, ink);
        
         let outcome = match outcome {
@@ -293,11 +548,4 @@ pub fn exec_wasm(
             .send(EvmApiRequest::StylusOutcome(outcome))
             .or_else(|_| Err(Escape::Exit(1)))
     });
-
-    Ok(CothreadHandler {
-        tx: tothread_tx,
-        rx: fromthread_rx,
-        thread: Some(thread),
-        last_request: None,
-    })
 }
