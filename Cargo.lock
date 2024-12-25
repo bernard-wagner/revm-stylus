@@ -3847,7 +3847,6 @@ dependencies = [
  "ethers-core",
  "ethers-providers",
  "eyre",
- "hex",
  "indicatif",
  "reqwest 0.12.7",
  "revm-interpreter",
