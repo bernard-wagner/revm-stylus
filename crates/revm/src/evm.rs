@@ -1,6 +1,8 @@
+use revm_interpreter::instructions::stack;
+
 use crate::{
     arbos::execution::{
-        is_stylus_bytecode, stylus_execute_frame, stylus_insert_call_return, StylusFrame
+        is_stylus_bytecode, stylus_execute_frame, stylus_insert_call_outcome, StylusFrame
     },
     builder::{EvmBuilder, HandlerStage, SetGenericStage},
     db::{Database, DatabaseCommit, EmptyDB},
@@ -100,12 +102,9 @@ impl<'a, EXT, DB: Database> Evm<'a, EXT, DB> {
         // Peek the last stack frame.
         let mut stack_frame = call_stack.last_mut().unwrap();
         loop {
-            println!("looping");
             let next_action = match stack_frame {
                 FrameType::Stylus(stylus_frame) => {
-                    println!("entering stylus frame");
                     let res = stylus_execute_frame(stylus_frame, &mut self.context)?;
-                    println!("exiting stylus frame");
                     res
                 }
                 FrameType::EVM(frame) => {
@@ -187,7 +186,7 @@ impl<'a, EXT, DB: Database> Evm<'a, EXT, DB> {
                             match result {
                                 FrameResult::Call(outcome) => {
                                     // return_call
-                                    stylus_insert_call_return(ctx, stylus_frame, outcome)?
+                                    stylus_insert_call_outcome(ctx, stylus_frame, outcome)?
                                 }
                                 _ => todo!(),
                             }

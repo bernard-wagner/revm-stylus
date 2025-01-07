@@ -14,7 +14,7 @@ use arbutil::{
     Bytes20, Bytes32,
 };
 use revm_interpreter::{
-    CallInputs, CallOutcome, CallScheme, CallValue, InterpreterAction, InterpreterResult
+    CallInputs, CallOutcome, CallScheme, CallValue, InterpreterAction, InterpreterResult, SharedMemory
 };
 use stylus::prover::programs::config::StylusConfig;
 
@@ -63,9 +63,7 @@ impl StylusFrame {
             frame.interpreter().contract.input.to_vec(),
             config,
             evm_data,
-            config
-                .pricing
-                .gas_to_ink(arbutil::evm::api::Gas(frame.interpreter().gas.limit())),
+            frame.interpreter().gas,
             fromthread_tx,
             tothread_rx,
         );
@@ -84,7 +82,6 @@ impl StylusFrame {
     ) -> InterpreterAction {
         loop {
             let request = self.rx.recv().unwrap();
-            println!("received request");
 
             match request {
                 EvmApiRequest::GetBytes32(..)
@@ -125,8 +122,7 @@ impl StylusFrame {
                 },
                 EvmApiRequest::Create1(..) | EvmApiRequest::Create2(..) => todo!(),
                 EvmApiRequest::Return(outcome, _) => {
-                    println!("outcome: {:#?}", outcome);
-                   return InterpreterAction::Return { result: outcome.result}
+                    return InterpreterAction::Return { result: outcome.result}
                 }
             };
         }
@@ -168,13 +164,12 @@ pub fn stylus_execute_frame<EXT, DB: Database>(
 }
 
 #[inline]
-pub fn stylus_insert_call_return<EXT, DB: Database>(
+pub fn stylus_insert_call_outcome<EXT, DB: Database>(
     context: &mut Context<EXT, DB>,
     frame: &mut StylusFrame,
     outcome: CallOutcome,
 ) -> Result<(), EVMError<DB::Error>> {
-    context.evm.take_error()?;
-
+    
     let outcome = outcome.result;
     match outcome.result {
         InstructionResult::Return => {

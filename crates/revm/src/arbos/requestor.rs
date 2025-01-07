@@ -134,7 +134,6 @@ impl RequestHandler<VecReader> for StylusRequestor {
         req_data: impl AsRef<[u8]>,
     ) -> (Vec<u8>, VecReader, Gas) {
         let mut data = req_data.as_ref().to_vec();
-        println!("requesting {:?}", req_type);
         let msg = match req_type {
             EvmApiMethod::GetBytes32 => {
                 let data = revm_types::take_u256(&mut data);
@@ -279,15 +278,14 @@ impl RequestHandler<VecReader> for StylusRequestor {
                     Gas(gas_cost),
                 ),
                 EvmApiOutcome::Call(stylus_outcome, gas_cost) => {
+                    
                     let (result, data) = match stylus_outcome {
                         StylusOutcome::Return(data) => (Status::Success, data),
                         StylusOutcome::Revert(data) => (Status::Failure, data),
                         StylusOutcome::Failure => (Status::Failure, vec![].into()),
                         StylusOutcome::OutOfInk => (Status::OutOfGas, vec![].into()),
                     };
-
-                    println!("call result: {:#?}", data);
-
+                    println!("Call outcome: {:?}", data);
                     (result.into(), VecReader::new(data.to_vec()), Gas(gas_cost))
                 }
                 EvmApiOutcome::Create(stylus_outcome, address, gas_cost) => {
@@ -324,7 +322,7 @@ pub fn exec_wasm(
     calldata: Vec<u8>,
     config: StylusConfig,
     evm_data: EvmData,
-    ink: Ink,
+    gas: revm_interpreter::Gas,
     tx: SyncSender<EvmApiRequest>,
     rx: Receiver<EvmApiOutcome>,
 )  {
@@ -340,11 +338,13 @@ pub fn exec_wasm(
     )
     .unwrap();
 
-    
+    let ink_limit = config.pricing.gas_to_ink(Gas(gas.limit()));
+
+    let mut gas = gas.clone();
 
     // TODO handle join
     let join = thread::spawn(move || {
-        let outcome = instance.run_main(&calldata, config, ink);
+        let outcome = instance.run_main(&calldata, config, ink_limit);
 
         let ink_left = match outcome.as_ref() {
             Ok(UserOutcome::OutOfStack) => Ink(0), // take all ink when out of stack
@@ -359,6 +359,12 @@ pub fn exec_wasm(
         let (out_kind, data) = outcome.into_data();
         let gas_left = config.pricing.ink_to_gas(ink_left);
 
+        if !gas.record_cost(gas.limit()) {
+            panic!("gas limit exceeded");
+        }
+
+        gas.erase_cost(gas_left.0);
+
         let outcome = match out_kind {
             UserOutcomeKind::Success => revm_interpreter::InstructionResult::Return,
             UserOutcomeKind::Revert => revm_interpreter::InstructionResult::Revert,
@@ -372,7 +378,7 @@ pub fn exec_wasm(
             result: InterpreterResult{
                 result: outcome,
                 output: data.into(),
-                gas: revm_interpreter::Gas::new(gas_left.0),
+                gas: gas,
             },
 
         };
