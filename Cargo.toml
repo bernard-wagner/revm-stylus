@@ -21,6 +21,7 @@ members = [
     # variants
     "crates/optimism",
     "crates/inspector",
+    "crates/arbos",
 
     # utility
     "crates/statetest-types",
@@ -32,6 +33,7 @@ members = [
     "examples/uniswap_get_reserves",
     "examples/uniswap_v2_usdc_swap",
     "examples/erc20_gas",
+    "examples/arbos",
     #"examples/custom_opcodes",
 ]
 resolver = "2"
@@ -41,6 +43,7 @@ default-members = ["crates/revm"]
 # revm
 revm = { path = "crates/revm", version = "19.2.0", default-features = false }
 primitives = { path = "crates/primitives", package = "revm-primitives", version = "15.1.0", default-features = false }
+revm-arbos = { path = "crates/arbos", package = "revm-arbos", version = "1.0.0", default-features = false }
 bytecode = { path = "crates/bytecode", package = "revm-bytecode", version = "1.0.0", default-features = false }
 database = { path = "crates/database", package = "revm-database", version = "1.0.0", default-features = false }
 database-interface = { path = "crates/database/interface", package = "revm-database-interface", version = "1.0.0", default-features = false }
