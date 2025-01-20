@@ -5,7 +5,7 @@ use revm::interpreter::SharedMemory;
 use revm::primitives::{bytes, Bytes};
 use revm::{
     interpreter::{
-        interpreter::{EthInterpreter, ExtBytecode, InterpreterTrait},
+        interpreter::{EthInterpreter, ExtBytecode},
         table::CustomInstruction,
         Host, InputsImpl, Interpreter, InterpreterAction, InterpreterTypes, MemoryGetter,
     },
@@ -86,18 +86,6 @@ impl<CTX, EXT: Default, MG: MemoryGetter> ArbInterpreter<CTX, EXT, MG>
 where
     CTX: Host + BlockGetter + CfgGetter + Send + 'static,
 {
-    /// Executes the instruction at the current instruction pointer.
-    ///
-    /// Internally it will increment instruction pointer by one.
-    #[inline]
-    pub fn step<FN>(&mut self, instruction_table: &[FN; 256], host: &mut CTX)
-    where
-        FN: CustomInstruction<Wire = EthInterpreter<EXT, MG>, Host = CTX>,
-        FN::Wire: InterpreterTypes,
-    {
-        self.inner.step(instruction_table, host);
-    }
-
     /// Executes the interpreter until it returns or stops.
     pub fn run<FN>(
         &mut self,
@@ -117,17 +105,6 @@ impl<CTX, EXT: Default, MG: MemoryGetter> InternalInterpreter<CTX, EXT, MG>
 where
     CTX: Host + BlockGetter + CfgGetter + Send + 'static,
 {
-    fn step<FN>(&mut self, instruction_table: &[FN; 256], host: &mut CTX)
-    where
-        FN: CustomInstruction<Wire = EthInterpreter<EXT, MG>, Host = CTX>,
-        FN::Wire: InterpreterTypes,
-    {
-        match self {
-            Self::Arb(_) => todo!(),
-            Self::Eth(interpreter) => interpreter.step(instruction_table, host),
-        }
-    }
-
     fn run<FN>(
         &mut self,
         instruction_table: &[FN; 256],
@@ -139,7 +116,7 @@ where
         FN::Wire: InterpreterTypes,
     {
         match self {
-            Self::Arb(interpreter) => interpreter.run(host, cb), // downcast
+            Self::Arb(interpreter) => interpreter.run(host, cb),
             Self::Eth(interpreter) => interpreter.run(instruction_table, host),
         }
     }

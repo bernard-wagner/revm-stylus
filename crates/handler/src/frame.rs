@@ -9,7 +9,7 @@ use core::{cell::RefCell, cmp::min};
 use handler_interface::{Frame, FrameOrResultGen, PrecompileProvider};
 use interpreter::{
     gas,
-    interpreter::{EthInterpreter, ExtBytecode, InstructionProvider, InterpreterTrait},
+    interpreter::{EthInterpreter, ExtBytecode, InstructionProvider},
     interpreter_types::{LoopControl, ReturnData, RuntimeFlag},
     return_ok, return_revert, CallInputs, CallOutcome, CallValue, CreateInputs, CreateOutcome,
     CreateScheme, EOFCreateInputs, EOFCreateKind, FrameInput, Gas, Host, InputsImpl,
