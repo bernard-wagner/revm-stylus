@@ -34,3 +34,7 @@ pub trait Frame: Sized {
         result: Self::FrameResult,
     ) -> Result<(), Self::Error>;
 }
+pub struct ContextWrapper<T: Frame>(pub T::Context);
+
+unsafe impl<T: Frame> Send for ContextWrapper<T> {}
+unsafe impl<T: Frame> Sync for ContextWrapper<T> {}

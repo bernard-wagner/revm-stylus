@@ -1,32 +1,32 @@
-use super::frame_data::*;
-use bytecode::{Eof, EOF_MAGIC_BYTES};
-use context_interface::{
+use core::{cell::RefCell, cmp::min};
+use revm::bytecode::{Eof, EOF_MAGIC_BYTES};
+use revm::context_interface::{
     journaled_state::{Journal, JournalCheckpoint},
     BlockGetter, Cfg, CfgGetter, ErrorGetter, JournalDBError, JournalGetter, Transaction,
     TransactionGetter,
 };
-use core::{cell::RefCell, cmp::min};
-use handler_interface::{Frame, FrameOrResultGen, PrecompileProvider};
-use interpreter::{
+use revm::handler_interface::{Frame, FrameOrResultGen, PrecompileProvider};
+use revm::interpreter::{
     gas,
-    interpreter::{EthInterpreter, ExtBytecode, InstructionProvider, InterpreterTrait},
+    interpreter::{EthInterpreter, ExtBytecode, InstructionProvider},
     interpreter_types::{LoopControl, ReturnData, RuntimeFlag},
     return_ok, return_revert, CallInputs, CallOutcome, CallValue, CreateInputs, CreateOutcome,
     CreateScheme, EOFCreateInputs, EOFCreateKind, FrameInput, Gas, Host, InputsImpl,
-    InstructionResult, Interpreter, InterpreterAction, InterpreterResult, InterpreterTypes,
-    SharedMemory,
+    InstructionResult, InterpreterAction, InterpreterResult, SharedMemory,
 };
-use precompile::PrecompileErrors;
-use primitives::{keccak256, Address, Bytes, B256, U256};
-use specification::{
+use revm::precompile::PrecompileErrors;
+use revm::primitives::{keccak256, Address, Bytes, B256, U256};
+use revm::specification::{
     constants::CALL_STACK_LIMIT,
     hardfork::SpecId::{self, HOMESTEAD, LONDON, OSAKA, SPURIOUS_DRAGON},
 };
-use state::Bytecode;
-use std::borrow::ToOwned;
+use revm::state::Bytecode;
+
+use crate::interpreter::ArbInterpreter;
+use revm::handler::{CallFrame, CreateFrame, EOFCreateFrame, FrameData, FrameResult};
 use std::{rc::Rc, sync::Arc};
 
-pub struct EthFrame<CTX, ERROR, IW: InterpreterTypes, PRECOMPILE, INSTRUCTIONS> {
+pub struct ArbOsFrame<CTX, ERROR, PRECOMPILE, INSTRUCTIONS> {
     _phantom: core::marker::PhantomData<fn() -> (CTX, ERROR)>,
     data: FrameData,
     // TODO : Include this
@@ -34,7 +34,7 @@ pub struct EthFrame<CTX, ERROR, IW: InterpreterTypes, PRECOMPILE, INSTRUCTIONS> 
     /// Journal checkpoint.
     pub checkpoint: JournalCheckpoint,
     /// Interpreter.
-    pub interpreter: Interpreter<IW>,
+    pub interpreter: ArbInterpreter<CTX>,
     /// Precompiles provider.
     pub precompiles: PRECOMPILE,
     /// Instruction provider.
@@ -43,15 +43,14 @@ pub struct EthFrame<CTX, ERROR, IW: InterpreterTypes, PRECOMPILE, INSTRUCTIONS> 
     pub memory: Rc<RefCell<SharedMemory>>,
 }
 
-impl<CTX, IW, ERROR, PRECOMP, INST> EthFrame<CTX, ERROR, IW, PRECOMP, INST>
+impl<CTX, ERROR, PRECOMP, INST> ArbOsFrame<CTX, ERROR, PRECOMP, INST>
 where
     CTX: JournalGetter,
-    IW: InterpreterTypes,
 {
     pub fn new(
         data: FrameData,
         depth: usize,
-        interpreter: Interpreter<IW>,
+        interpreter: ArbInterpreter<CTX>,
         checkpoint: JournalCheckpoint,
         precompiles: PRECOMP,
         instructions: INST,
@@ -70,12 +69,13 @@ where
     }
 }
 
-impl<CTX, ERROR, PRECOMPILE, INSTRUCTION>
-    EthFrame<CTX, ERROR, EthInterpreter<()>, PRECOMPILE, INSTRUCTION>
+impl<CTX, ERROR, PRECOMPILE, INSTRUCTION> ArbOsFrame<CTX, ERROR, PRECOMPILE, INSTRUCTION>
 where
     CTX: EthFrameContext + Send + 'static,
     ERROR: EthFrameError<CTX>,
-    PRECOMPILE: PrecompileProvider<Context = CTX, Error = ERROR, Output = InterpreterResult>,
+    PRECOMPILE:
+        PrecompileProvider<Context = CTX, Error = ERROR, Output = InterpreterResult> + 'static,
+    INSTRUCTION: InstructionProvider<WIRE = EthInterpreter<()>, Host = CTX> + 'static,
 {
     /// Make call frame
     #[inline]
@@ -185,7 +185,7 @@ where
                 return_memory_range: inputs.return_memory_offset.clone(),
             }),
             depth,
-            Interpreter::new(
+            ArbInterpreter::new(
                 memory.clone(),
                 ExtBytecode::new_with_hash(bytecode, code_hash),
                 interpreter_input,
@@ -199,6 +199,84 @@ where
             instructions,
             memory,
         )))
+    }
+
+    pub fn run_recursive(
+        inputs: FrameInput,
+        context: &mut CTX,
+        depth: usize,
+        memory: Rc<RefCell<SharedMemory>>,
+        precompiles: PRECOMPILE,
+        instructions: INSTRUCTION,
+    ) -> FrameResult {
+        let frame_or_result = match inputs {
+            FrameInput::Call(inputs) => Self::make_call_frame(
+                context,
+                depth + 1,
+                memory,
+                &inputs,
+                precompiles.clone(),
+                instructions.clone(),
+            ),
+            FrameInput::Create(inputs) => Self::make_create_frame(
+                context,
+                depth + 1,
+                memory,
+                &inputs,
+                precompiles.clone(),
+                instructions.clone(),
+            ),
+            FrameInput::EOFCreate(inputs) => Self::make_eofcreate_frame(
+                context,
+                depth + 1,
+                memory,
+                &inputs,
+                precompiles.clone(),
+                instructions.clone(),
+            ),
+        };
+
+        let frame = match frame_or_result {
+            Ok(FrameOrResultGen::Frame(frame)) => frame,
+            Ok(FrameOrResultGen::Result(result)) => return result,
+            Err(_) => todo!(),
+        };
+
+        match Self::run_inner(frame, context) {
+            Ok(result) => result,
+            Err(_) => todo!(),
+        }
+    }
+    fn run_inner(
+        frame: ArbOsFrame<CTX, ERROR, PRECOMPILE, INSTRUCTION>,
+        context: &mut CTX,
+    ) -> Result<FrameResult, ERROR> {
+        let mut frame_stack: Vec<Self> = vec![frame];
+        loop {
+            let frame = frame_stack.last_mut().unwrap();
+            let call_or_result = frame.run(context)?;
+
+            let result = match call_or_result {
+                FrameOrResultGen::Frame(init) => match frame.init(context, init)? {
+                    FrameOrResultGen::Frame(new_frame) => {
+                        frame_stack.push(new_frame);
+                        continue;
+                    }
+                    // Dont pop the frame as new frame was not created.
+                    FrameOrResultGen::Result(result) => result,
+                },
+                FrameOrResultGen::Result(result) => {
+                    // Pop frame that returned result
+                    frame_stack.pop();
+                    result
+                }
+            };
+
+            let Some(frame) = frame_stack.last_mut() else {
+                return Ok(result);
+            };
+            frame.return_result(context, result)?;
+        }
     }
 
     /// Make create frame.
@@ -291,7 +369,7 @@ where
         Ok(FrameOrResultGen::Frame(Self::new(
             FrameData::Create(CreateFrame { created_address }),
             depth,
-            Interpreter::new(
+            ArbInterpreter::new(
                 memory.clone(),
                 bytecode,
                 interpreter_input,
@@ -408,7 +486,7 @@ where
         Ok(FrameOrResultGen::Frame(Self::new(
             FrameData::EOFCreate(EOFCreateFrame { created_address }),
             depth,
-            Interpreter::new(
+            ArbInterpreter::new(
                 memory.clone(),
                 ExtBytecode::new(Bytecode::Eof(Arc::new(initcode))),
                 interpreter_input,
@@ -451,13 +529,13 @@ where
     }
 }
 
-impl<CTX, ERROR, PRECOMPILE, INSTRUCTION> Frame
-    for EthFrame<CTX, ERROR, EthInterpreter<()>, PRECOMPILE, INSTRUCTION>
+impl<CTX, ERROR, PRECOMPILE, INSTRUCTION> Frame for ArbOsFrame<CTX, ERROR, PRECOMPILE, INSTRUCTION>
 where
     CTX: EthFrameContext + Send + 'static,
     ERROR: EthFrameError<CTX>,
-    PRECOMPILE: PrecompileProvider<Context = CTX, Error = ERROR, Output = InterpreterResult>,
-    INSTRUCTION: InstructionProvider<WIRE = EthInterpreter<()>, Host = CTX>,
+    PRECOMPILE:
+        PrecompileProvider<Context = CTX, Error = ERROR, Output = InterpreterResult> + 'static,
+    INSTRUCTION: InstructionProvider<WIRE = EthInterpreter<()>, Host = CTX> + 'static,
 {
     type Context = CTX;
     type Error = ERROR;
@@ -510,10 +588,28 @@ where
     ) -> Result<FrameOrResultGen<Self::FrameInit, Self::FrameResult>, Self::Error> {
         let spec = context.cfg().spec().into();
 
+        let depth = self.depth;
+        let memory = self.memory.clone();
+        let precompiles = self.precompiles.clone();
+        let instructions = self.instructions.clone();
+
         // Run interpreter
-        let next_action = self
-            .interpreter
-            .run(self.instructions.table(), &mut *context);
+        let next_action = self.interpreter.run(
+            self.instructions.table(),
+            &mut *context,
+            Box::new(
+                move |context: &mut CTX, call_inputs: FrameInput| -> FrameResult {
+                    ArbOsFrame::run_recursive(
+                        call_inputs,
+                        context,
+                        depth,
+                        memory.clone(),
+                        precompiles.clone(),
+                        instructions.clone(),
+                    )
+                },
+            ),
+        );
 
         let mut interpreter_result = match next_action {
             InterpreterAction::NewFrame(new_frame) => {
@@ -589,7 +685,7 @@ where
                 let ins_result = *outcome.instruction_result();
                 let returned_len = outcome.result.output.len();
 
-                let interpreter = &mut self.interpreter;
+                let interpreter = self.interpreter.underlying_mut_ref();
                 let mem_length = outcome.memory_length();
                 let mem_start = outcome.memory_start();
                 *interpreter.return_data.buffer_mut() = outcome.result.output;
@@ -630,7 +726,7 @@ where
             }
             FrameResult::Create(outcome) => {
                 let instruction_result = *outcome.instruction_result();
-                let interpreter = &mut self.interpreter;
+                let interpreter = self.interpreter.underlying_mut_ref();
 
                 let buffer = interpreter.return_data.buffer_mut();
                 if instruction_result == InstructionResult::Revert {
@@ -664,7 +760,7 @@ where
             }
             FrameResult::EOFCreate(outcome) => {
                 let instruction_result = *outcome.instruction_result();
-                let interpreter = &mut self.interpreter;
+                let interpreter = self.interpreter.underlying_mut_ref();
                 if instruction_result == InstructionResult::Revert {
                     // Save data to return data buffer if the create reverted
                     *interpreter.return_data.buffer_mut() = outcome.output().to_owned()

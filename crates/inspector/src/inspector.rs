@@ -252,7 +252,9 @@ where
         + CfgGetter
         + JournalExtGetter
         + Host
-        + InspectorCtx<IT = EthInterpreter>,
+        + InspectorCtx<IT = EthInterpreter>
+        + Send
+        + 'static,
     ERROR: From<JournalDBError<CTX>> + From<PrecompileErrors>,
     PRECOMPILE: PrecompileProvider<Context = CTX, Error = ERROR, Output = InterpreterResult>,
 {

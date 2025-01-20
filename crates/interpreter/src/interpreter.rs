@@ -26,6 +26,30 @@ pub use stack::{Stack, STACK_LIMIT};
 use std::rc::Rc;
 use subroutine_stack::SubRoutineImpl;
 
+pub trait InterpreterTrait {
+    type Wire: InterpreterTypes;
+
+    /// Executes the instruction at the current instruction pointer.
+    ///
+    /// Internally it will increment instruction pointer by one.
+    fn step<FN, H>(&mut self, instruction_table: &[FN; 256], host: &mut H)
+    where
+        FN: CustomInstruction<Wire = Self::Wire, Host = H>,
+        H: Host,
+        FN::Wire: InterpreterTypes;
+
+    /// Executes the interpreter until it returns or stops.
+    fn run<FN, H: Host>(
+        &mut self,
+        instruction_table: &[FN; 256],
+        host: &mut H,
+    ) -> InterpreterAction
+    where
+        FN: CustomInstruction<Wire = Self::Wire, Host = H>,
+        H: Host,
+        FN::Wire: InterpreterTypes;
+}
+
 #[derive(Debug, Clone)]
 #[cfg_attr(feature = "serde", derive(::serde::Serialize, ::serde::Deserialize))]
 pub struct Interpreter<WIRE: InterpreterTypes> {
@@ -148,12 +172,13 @@ impl<IW: InterpreterTypes, H: Host> CustomInstruction for Instruction<IW, H> {
     }
 }
 
-impl<IW: InterpreterTypes> Interpreter<IW> {
+impl<IW: InterpreterTypes> InterpreterTrait for Interpreter<IW> {
+    type Wire = IW;
     /// Executes the instruction at the current instruction pointer.
     ///
     /// Internally it will increment instruction pointer by one.
     #[inline]
-    pub(crate) fn step<FN, H: Host>(&mut self, instruction_table: &[FN; 256], host: &mut H)
+    fn step<FN, H: Host>(&mut self, instruction_table: &[FN; 256], host: &mut H)
     where
         FN: CustomInstruction<Wire = IW, Host = H>,
     {
@@ -170,11 +195,7 @@ impl<IW: InterpreterTypes> Interpreter<IW> {
     }
 
     /// Executes the interpreter until it returns or stops.
-    pub fn run<FN, H: Host>(
-        &mut self,
-        instruction_table: &[FN; 256],
-        host: &mut H,
-    ) -> InterpreterAction
+    fn run<FN, H: Host>(&mut self, instruction_table: &[FN; 256], host: &mut H) -> InterpreterAction
     where
         FN: CustomInstruction<Wire = IW, Host = H>,
     {

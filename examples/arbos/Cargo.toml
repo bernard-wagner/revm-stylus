@@ -1,5 +1,5 @@
 [package]
-name = "example-uniswap-get-reserves"
+name = "example-arbos"
 version = "0.0.0"
 publish = false
 authors.workspace = true
@@ -22,19 +22,13 @@ rust_2018_idioms = "deny"
 all = "warn"
 
 [dependencies]
-# revm
 revm = { workspace = true, features = ["std"] }
-database = { workspace = true, features = ["std", "alloydb"] }
-
-# tokio
-tokio = { version = "1.40", features = ["rt-multi-thread", "macros"] }
-
-# alloy
+database.workspace = true
+revm-arbos = { workspace = true, features = ["std"]}
 alloy-sol-types = { version = "0.8.2", default-features = false, features = [
     "std",
 ] }
-alloy-eips = "0.6"
-alloy-provider = "0.6"
+tokio = { version = "1.40", features = ["rt-multi-thread", "macros"] }
 
 # mics
 anyhow = "1.0.89"

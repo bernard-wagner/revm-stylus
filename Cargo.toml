@@ -19,6 +19,7 @@ members = [
     "crates/handler",
 
     # variants
+    "crates/arbos",
     "crates/optimism",
     "crates/inspector",
 
@@ -26,6 +27,7 @@ members = [
     "crates/statetest-types",
 
     # examples
+    "examples/arbos",
     "examples/block_traces",
     "examples/contract_deployment",
     "examples/database_components",
@@ -54,6 +56,8 @@ context = { path = "crates/context", package = "revm-context", version = "1.0.0"
 context-interface = { path = "crates/context/interface", package = "revm-context-interface", version = "1.0.0", default-features = false }
 handler = { path = "crates/handler", package = "revm-handler", version = "1.0.0", default-features = false }
 handler-interface = { path = "crates/handler/interface", package = "revm-handler-interface", version = "1.0.0", default-features = false }
+
+revm-arbos = { path = "crates/arbos", package = "revm-arbos", version = "1.0.0", default-features = false }
 
 # misc
 cfg-if = { version = "1.0", default-features = false }
